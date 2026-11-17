@@ -1,7 +1,0 @@
-# Static site: no build step, the app is index.html in the repo root.
-[build]
-  publish = "."
-
-[functions]
-  directory = "netlify/functions"
-  node_bundler = "esbuild"
