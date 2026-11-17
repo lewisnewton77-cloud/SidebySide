@@ -1164,7 +1164,8 @@ async function setCoverBlob(id,blob,isUser){
   try{const dm=dominantOf(bmp);if(dm)spineCol[id]=toHex(dm[0]*.96,dm[1]*.96,dm[2]*.96)}catch(_){}
   if(coverSrc[id]&&coverSrc[id].startsWith('blob:'))URL.revokeObjectURL(coverSrc[id]);
   coverSrc[id]=URL.createObjectURL(blob);if(isUser)userCover.add(id);
-  paintSpines();sleeves.forEach(s=>{if(s.a.id===id)applyFace(s)});if(window.S3D)S3D.refresh(id);return true}
+  schedPaint();sleeves.forEach(s=>{if(s.a.id===id)applyFace(s)});if(window.S3D)S3D.refresh(id);return true}
+let _ps=0;function schedPaint(){if(!_ps)_ps=requestAnimationFrame(()=>{_ps=0;paintSpines()})}
 function jsonp(url,ms){return new Promise((res,rej)=>{const cb='__wl'+Math.random().toString(36).slice(2),s=document.createElement('script');let t;
   const done=()=>{clearTimeout(t);window[cb]=function(){};s.remove()};window[cb]=d=>{done();res(d)};s.onerror=()=>{done();rej(new Error('jsonp'))};
   t=setTimeout(()=>{done();rej(new Error('timeout'))},ms||9000);s.src=url+'&callback='+cb;document.head.appendChild(s)})}
@@ -1173,7 +1174,7 @@ function pickBest(results,al){const A=norm(al.a),T=norm(al.t);let best=null,bs=-
     if(rt===T)s+=3;else if(rt&&(rt.startsWith(T)||T.startsWith(rt)))s+=2;else if(rt.indexOf(T)>-1)s+=1;
     if(ra===A)s+=3;else if(ra&&(ra.indexOf(A)>-1||A.indexOf(ra)>-1))s+=2;if(s>bs){bs=s;best=r}});return bs>=4?best:null}
 async function viaItunes(al){const d=await jsonp('https://itunes.apple.com/search?media=music&entity=album&limit=15&term='+encodeURIComponent(al.a+' '+al.t));
-  const r=pickBest(d&&d.results,al);return r&&r.artworkUrl100?r.artworkUrl100.replace(/\/\d+x\d+bb\./,'/1200x1200bb.'):null}
+  const r=pickBest(d&&d.results,al);return r&&r.artworkUrl100?r.artworkUrl100.replace(/\/\d+x\d+bb\./,'/600x600bb.'):null}
 let mbChain=Promise.resolve(),mbNext=0;
 function viaMB(al){const run=async()=>{await new Promise(r=>setTimeout(r,1100));
     const q='releasegroup:"'+al.t.replace(/"/g,'')+'" AND artist:"'+al.a.replace(/"/g,'')+'"';
@@ -1187,7 +1188,7 @@ async function fromUrl(al,url){
     const blob=await new Promise(r=>c.toBlob(r,'image/jpeg',.9));if(blob&&await setCoverBlob(al.id,blob,false)){idbPut(al.id,{url,blob});return true}}catch(_){}
   return false}
 async function viaItunesBook(al){const d=await jsonp('https://itunes.apple.com/search?media=ebook&entity=ebook&limit=15&term='+encodeURIComponent(al.a+' '+al.t));
-  const r=pickBest((d&&d.results||[]).map(x=>({...x,collectionName:x.trackName||x.collectionName})),al);return r&&r.artworkUrl100?r.artworkUrl100.replace(/\/\d+x\d+bb\./,'/1200x1200bb.'):null}
+  const r=pickBest((d&&d.results||[]).map(x=>({...x,collectionName:x.trackName||x.collectionName})),al);return r&&r.artworkUrl100?r.artworkUrl100.replace(/\/\d+x\d+bb\./,'/600x600bb.'):null}
 async function viaPokemon(al){const q='name:"'+al.t.replace(/"/g,'')+'"'+(al.a?' set.name:"'+al.a.replace(/"/g,'').replace(/ set$/i,'')+'*"':'');
   let r=await fetch('https://api.pokemontcg.io/v2/cards?pageSize=8&q='+encodeURIComponent(q));let d=r.ok?await r.json():null;
   if(!d||!d.data||!d.data.length){r=await fetch('https://api.pokemontcg.io/v2/cards?pageSize=8&q='+encodeURIComponent('name:"'+al.t.replace(/"/g,'')+'"'));d=r.ok?await r.json():null}
@@ -1250,15 +1251,37 @@ async function importArt(file){let j=null;try{j=JSON.parse(await file.text())}ca
   if(Array.isArray(j.recs)){j.recs.forEach(x=>{if(!x||!x.id)return;if(BY_ID[x.id]){Object.assign(BY_ID[x.id],x)}else{const r=hydrate({...x});RECS.push(r);BY_ID[r.id]=r;nr++}});(j.owned||[]).forEach(id=>{if(BY_ID[id])owned.add(id)});reindex();try{saveLocal()}catch(_){}try{persist()}catch(_){}refreshAll()}const byKey={};RECS.forEach(r=>{byKey[(r.k||'lp')+'|'+keyOf(r.a,r.t)]=r});
   for(const it of j.items){const r=BY_ID[it.id]||byKey[it.k+'|'+it.key];if(!r||!it.d)continue;try{const blob=await (await fetch(it.d)).blob();await idbPut(it.p+r.id,{url:'pack',blob,user:it.user});if(!it.p){if(await setCoverBlob(r.id,blob,!!it.user))n++}else{if(it.p==='back:')r.bk=1;if(it.p==='disc:')r.dp=1;n++;if(window.S3D)S3D.refresh(r.id)}}catch(_){}}
   artState.blocked=false;try{commitChange()}catch(_){}refreshAll();toast('Restored '+(j.recs?j.recs.length+' items and ':'')+n+' images')}
+/* art bundle (on your Netlify site): one request returns every known cover + spine colour, shared by all users;
+   images then come from your own site, 12 at a time, current item and category first */
+const ART_API=/^https?:$/.test(location.protocol)&&!/claude/.test(location.hostname)?'/api/art':null;
+const artKey=a=>{const k=a.k||'lp';return k+'|'+keyOf(a.a,a.t)+(k==='game'&&a.tdb?'|'+a.tdb+'|'+(a.l||''):'')};
+async function viaBundle(list,tick){const done=new Set();if(!ART_API||!list.length)return done;const byKey={},order=new Map();
+  list.forEach((a,i)=>{const k=artKey(a);(byKey[k]=byKey[k]||[]).push(a);if(!order.has(k))order.set(k,i)});
+  let ask=Object.keys(byKey).map(key=>{const a=byKey[key][0];return {key,k:a.k||'lp',a:a.a||'',t:a.t||'',code:a.tdb||'',region:a.l||''}});
+  const q=[],colours={};let busy=0,fin=false;
+  const pull=async()=>{busy++;while(q.length){q.sort((x,y)=>order.get(x[2])-order.get(y[2]));const [a,e,key]=q.shift();try{const r=await fetch(e.img);if(!r.ok)continue;const b=await r.blob();
+      if(a.k==='game'){const bm=await createImageBitmap(b),ar=bm.width/bm.height,good=ar>.55&&ar<.76&&!eshopCard(bm);if(bm.close)bm.close();if(!good)continue}
+      if(await setCoverBlob(a.id,b,false)){idbPut(a.id,{url:e.img,blob:b,box:1,box2:1});done.add(a.id);tick(true);if(!e.spine&&spineCol[a.id])colours[key]={spine:spineCol[a.id]}}}catch(_){}}busy--};
+  const workers=[];
+  for(let round=0;round<8&&ask.length;round++){let j=null;try{const r=await fetch(ART_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:ask})});if(r.ok)j=await r.json()}catch(_){}if(!j)break;
+    let dirty=false;for(const [key,e] of Object.entries(j.entries||{}))for(const a of byKey[key]||[]){if(e.spine&&!coverSrc[a.id]){spineCol[a.id]=e.spine;dirty=true}q.push([a,e,key])}
+    if(dirty)schedPaint();while(workers.length-busy<12&&workers.length<12)workers.push(pull());
+    const p=new Set(j.pending||[]);ask=ask.filter(x=>p.has(x.key))}
+  await Promise.all(workers);if(q.length)await Promise.all(Array.from({length:12},pull));
+  if(Object.keys(colours).length)fetch(ART_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({colours})}).catch(()=>{});
+  return done}
 async function artFor(list){
   if(!list.length)return;const total=list.length;artState.done=0;artState.found=0;
   const tick=ok=>{artState.done++;if(ok)artState.found++;artState.text=artState.done<total?'covers '+artState.done+'/'+total:'';syncStat()};
+  const ALL=await idbAll();
   const cached=await Promise.all(list.map(async a=>{const bu=(a.k==='game'&&a.gart&&GAME_ART[a.gart])?GAME_ART[a.gart].f:(a.lab==='ej'&&typeof NIA_COVER!=='undefined'?NIA_COVER:null);
     if(bu){try{const b=await (await fetch(bu)).blob();idbPut(a.id,{url:'bundled',blob:b,user:true});return !!(await setCoverBlob(a.id,b,true))}catch(_){}}
-    const c=await idbGet(a.id);if(a.k==='game'&&c&&!c.user&&c.blob){if(!c.box2)try{const bm=await createImageBitmap(c.blob),ok=goodBox(bm);if(bm.close)bm.close();if(!ok)return false;c.box2=1;idbPut(a.id,c)}catch(_){return false}}return !!(c&&c.blob&&await setCoverBlob(a.id,c.blob,!!c.user))}));
+    const c=ALL.get(a.id);if(a.k==='game'&&c&&!c.user&&c.blob){if(!c.box2)try{const bm=await createImageBitmap(c.blob),ok=goodBox(bm);if(bm.close)bm.close();if(!ok)return false;c.box2=1;idbPut(a.id,c)}catch(_){return false}}return !!(c&&c.blob&&await setCoverBlob(a.id,c.blob,!!c.user))}));
   const need=[];list.forEach((a,i)=>{if(cached[i])tick(true);else need.push(a)});
+  need.sort((x,y)=>((y===out)-(x===out))*4+(((y.k||'lp')===KIND)-((x.k||'lp')===KIND))*2);
+  if(ART_API&&need.length){const got=await viaBundle(need.slice(),tick);for(let i=need.length-1;i>=0;i--)if(got.has(need[i].id))need.splice(i,1)}
   if(need.length&&!(await netOK())){artState.blocked=true;need.forEach(()=>tick(false));artState.text='';syncStat();return}
-  if(out)need.sort((x,y)=>(y===out)-(x===out));
+  need.sort((x,y)=>((y===out)-(x===out))*4+(((y.k||'lp')===KIND)-((x.k||'lp')===KIND))*2);
   const worker=async()=>{while(need.length){const a=need.shift();tick(BY_ID[a.id]?await fromNetwork(a).catch(()=>false):false)}};
   await Promise.all([worker(),worker(),worker(),worker(),worker(),worker()]);
   artState.text=artState.found?'':'placeholder art';syncStat();spineFor(list.filter(a=>BY_ID[a.id]&&!a.sc&&(a.k||'lp')==='lp'))}
@@ -1464,6 +1487,7 @@ $('upFile').addEventListener('change',async e=>{const f=e.target.files&&e.target
 SHEET.addEventListener('keydown',e=>{if(e.key==='Escape'){e.stopPropagation();closeSheet()}});
 
 /* ---------- boot ---------- */
+try{document.fonts&&document.fonts.addEventListener('loadingdone',()=>{schedPaint();if(window.S3D&&typeof active!=='undefined'&&active)S3D.refresh(active.a.id)})}catch(_){}
 (async function boot(){
   loadLocal();ensureMoon();ensureGames();ensureShelf1();ensureNia2();ensureArceus();ensureItb();ensureSifu();ensureGd();applyRoom();applyKindText();refreshAll();
   LID.style.backgroundImage='url('+woodURL('#a3602f','#6e3a17','#c47c45','h',1400,40)+')';
@@ -1645,7 +1669,7 @@ const GL=document.getElementById('gl3d');
 let renderer;
 try{renderer=new THREE.WebGLRenderer({canvas:GL,antialias:true,alpha:true,powerPreference:'high-performance'})}catch(_){renderer=null}
 if(renderer){
-renderer.setPixelRatio(Math.min(devicePixelRatio||1,2));
+renderer.setPixelRatio(Math.min(devicePixelRatio||1,(()=>{try{return localStorage.getItem('sbs-q')==='low'}catch(_){return false}})()?1:1.5));
 renderer.outputColorSpace=THREE.SRGBColorSpace;renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.0;
 renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;
 const MAXANI=renderer.capabilities.getMaxAnisotropy();
@@ -3308,12 +3332,12 @@ const SPIN=Math.PI*2/560;
 const shownTwin=()=>{const s=active;return s&&s.target===2?V.get(s):null};
 function spinBy(o,dx,base){o.yaw=base+dx*SPIN}
 let raf=0,last=0,t0=performance.now();
-function kick(){if(!raf){last=performance.now();raf=requestAnimationFrame(frame)}}
-function frame(now){raf=0;const dt=Math.min(.05,(now-last)/1000||.016);last=now;const t=(now-t0)/1000;let moving=false;
+let lastAct=performance.now(),idleT=0;function kick(){lastAct=performance.now();if(idleT){clearTimeout(idleT);idleT=0;raf=0}if(!raf){last=performance.now();raf=requestAnimationFrame(frame)}}
+function frame(now){raf=0;const dt=Math.min(.05,(now-last)/1000||.016);last=now;const t=(now-t0)/1000;let moving=false,anyDisp=false,anyWatch=false;
   V.forEach(o=>{
     if(!o.disp){o.tout=0;o.solo=0;if(!o.dragging){o.yawV=0;o.yaw+=(0-o.yaw)*Math.min(1,dt*10)}}
     if(!o.dragging){o.yaw+=o.yawV*dt;o.yawV*=Math.exp(-2.2*dt);if(Math.abs(o.yawV)<.02)o.yawV=0}
-    const sway=o.disp&&!o.dragging&&!o.yawV&&!RM&&!o.spin360?Math.sin(t*.45)*.08*(o.gameG?1-.85*Math.min(1,Math.max(0,o.out)):1):0;o.sw+=(sway-o.sw)*Math.min(1,dt*2);
+    const sway=o.disp&&!o.dragging&&!o.yawV&&!RM&&!o.spin360&&performance.now()-lastAct<6000?Math.sin(t*.45)*.08*(o.gameG?1-.85*Math.min(1,Math.max(0,o.out)):1):0;o.sw+=(sway-o.sw)*Math.min(1,dt*2);o.swT=sway;if(sway)moving=true;
     o.vrx=(o.vrx+(o.trx-o.rx)*90*dt)*Math.exp(-11*dt);o.rx+=o.vrx*dt;
     o.vout=(o.vout+(o.tout-o.out)*60*dt)*Math.exp(-9*dt);o.out+=o.vout*dt;if(o.gameG){const v=Math.max(0,Math.min(1.03,o.out)),f=Math.min(1,vw*.92/((o.gb||300)*((o.gameG&&o.gameG.SPAN)||1.3)*1.04));o.gameG.open(v);if(o.gb)o.gameG.G.scale.setScalar(o.gb*(1-(1-f)*Math.min(1,v)));if(!o.disp||o.out<.5)o.cartT=0;o.vcart=((o.vcart||0)+((o.cartT||0)-(o.cart||0))*70*dt)*Math.exp(-11*dt);o.cart=Math.max(0,Math.min(1.08,(o.cart||0)+o.vcart*dt));if(!o.cdrag){o.cyaw=(o.cyaw||0)+(o.cyawV||((o.cartT||0)>.5&&!RM?.8:0))*dt;o.cyawV=(o.cyawV||0)*Math.exp(-1.6*dt);if(Math.abs(o.cyawV)<.05)o.cyawV=0;if((o.cartT||0)<.5)o.cyaw*=Math.exp(-4*dt)}o.gameG.lift(Math.min(1,o.cart),o.cyaw,t)}
     const cs=o.kind==='card'&&o.disp&&!o.dragging&&!RM&&!o.custom;if(o.spin360){o.spin.rotation.set(0,0,0);o.custom.show(o.yaw)}else o.spin.rotation.set(o.rx+(o.pitch||0)+(cs?Math.sin(t*.53)*.14:0),o.yaw+o.sw*(o.kind==='card'?3:1),0);
@@ -3332,13 +3356,13 @@ function frame(now){raf=0;const dt=Math.min(.05,(now-last)/1000||.016);last=now;
     o.so=(o.so||0)+((o.solo?1:0)-(o.so||0))*Math.min(1,dt*5);const so=o.so,ks=1-so;if(Math.abs((o.solo?1:0)-so)>.002)moving=true;if(o.solo){if(!o.dragging){o.pitch=(o.pitch||0)+(o.pitchV||0)*dt;o.pitchV=(o.pitchV||0)*Math.exp(-1.6*dt);if(Math.abs(o.pitchV)<.02)o.pitchV=0}}else if(o.pitch){const pw=Math.atan2(Math.sin(o.pitch),Math.cos(o.pitch));o.pitch=pw*(1-Math.min(1,dt*6));o.pitchV=0;if(Math.abs(o.pitch)<.001)o.pitch=0}o.disc.position.set(ks*o.out*.44*sz,0,so*sz*.06);o.disc.rotation.z=-o.out*1.1-dr;o.holder.position.x=o.kind==='lp'?-ks*o.out*.17*sz:0;if(o.sleeveG){o.sleeveG.visible=so<.985;o.sleeveG.position.set(-so*sz*.15,-so*sz*.2,-so*sz*.7);o.sleeveG.scale.setScalar(sz*(1-.55*so))}if(o.fill){o.root.updateMatrixWorld(true);if(o.fill.update(dt,o.disc,o.drv||0,o.disp||o.ready))moving=true}o.liq.rotation.z=o.out*1.1+dr+o.slosh;
     if(spinning)moving=true;
     o.root.visible=o.ready;
-    if(o.disp||Math.abs(o.yaw)>.002||Math.abs(o.out)>.002||o.yawV||Math.abs(o.vrx)>.001)moving=true});
+    if(o.disp){anyDisp=true;if(o.watch)anyWatch=true}if(o.dragging||o.yawV||Math.abs(o.vout)>.0015||Math.abs(o.tout-o.out)>.002||Math.abs(o.vrx)>.001||(!o.disp&&(Math.abs(o.yaw)>.002||Math.abs(o.out)>.002))||Math.abs(o.sw-(o.swT||0))>.002)moving=true});
   renderer.render(scene,camera);
-  if(moving||V.size)raf=requestAnimationFrame(frame)}
+  if(moving)raf=requestAnimationFrame(frame);else if(anyDisp){raf=1;idleT=setTimeout(()=>{idleT=0;raf=requestAnimationFrame(frame)},anyWatch?120:1000)}}
 addEventListener('resize',()=>{resize();kick()});
 
 const TT={on:false,strobe:false};
-window.S3D={holder:()=>HOLD,setHolder(h){HOLD=h==='sleeve'||h==='top'?h:'bare';S3D.rebuildAll()},quality:()=>QLT,setQuality(q){QLT=q==='low'?'low':'high';for(const k in _dmCache)delete _dmCache[k];S3D.rebuildAll()},spinState:TT,setSpin(on){TT.on=on;if(!on)TT.strobe=false;kick()},setStrobe(on){TT.strobe=on;kick()},sync,drop:drop3d,refresh(id){V.forEach(o=>{if(o.s.a.id===id)paint(o)})},
+window.S3D={holder:()=>HOLD,setHolder(h){HOLD=h==='sleeve'||h==='top'?h:'bare';S3D.rebuildAll()},quality:()=>QLT,setQuality(q){QLT=q==='low'?'low':'high';try{renderer.setPixelRatio(Math.min(devicePixelRatio||1,QLT==='low'?1:1.5));resize()}catch(_){}for(const k in _dmCache)delete _dmCache[k];S3D.rebuildAll()},spinState:TT,setSpin(on){TT.on=on;if(!on)TT.strobe=false;kick()},setStrobe(on){TT.strobe=on;kick()},sync,drop:drop3d,refresh(id){V.forEach(o=>{if(o.s.a.id===id)paint(o)})},
   /* gestures on the displayed sleeve, called from the app's own sleeve handler */
   grab(s){const o=V.get(s);if(!o)return null;if(o.solo){o.dragging=true;o.yawV=0;o.pitchV=0;return {o,solo:1,base:o.yaw,bp:o.pitch||0,lx:0,ly:0,lt:0}}if(o.gameG&&(o.cartT||0)>.5){o.cdrag=true;o.cyawV=0;return {o,cart:1,base:o.cyaw||0,lx:0,lt:0}}o.dragging=true;o.yawV=0;return {o,base:o.yaw,lx:0,lt:0}},
   spin(h,dx,dy,ex){const o=h.o,now=performance.now(),dt=Math.max(1,now-(h.lt||now-16));if(h.solo){spinBy(o,dx,h.base);o.pitch=h.bp+dy*SPIN;o.trx=0;if(h.lt){o.yawV=o.yawV*.6+((ex-h.lx)*SPIN/(dt/1000))*.4;o.pitchV=(o.pitchV||0)*.6+((dy-h.ly)*SPIN/(dt/1000))*.4}h.lx=ex;h.ly=dy;h.lt=now;kick();return}if(h.cart){o.cyaw=h.base+dx*SPIN*1.6;if(h.lt)o.cyawV=(o.cyawV||0)*.6+((ex-h.lx)*SPIN*1.6/(dt/1000))*.4;h.lx=ex;h.lt=now;kick();return}spinBy(o,dx,h.base);o.trx=o.spin360?0:Math.max(-1,Math.min(1,dy/220))*1.15;
